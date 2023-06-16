@@ -70,7 +70,7 @@ Available Colors:
 
 Formatting Options:
 
-- old
+- bold
 - Italic
 - Underline
 ### Quitting the Client
