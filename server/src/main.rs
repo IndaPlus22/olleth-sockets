@@ -1,85 +1,74 @@
+use std::{
+    io::{ErrorKind, Read, Write},
+    net::TcpListener,
+    sync::mpsc,
+    thread,
+};
 
-// use std::{
-//     fs,
-//     io::{prelude::*, BufReader},
-//     net::{TcpListener, TcpStream},
-// };
+const LOCAL: &str = "127.0.0.1:6000";
+const MSG_SIZE: usize = 32;
 
-// fn main() {
-//     let listener = TcpListener::bind("127.0.0.1:7878").unwrap();
-
-//     for stream in listener.incoming() {
-//         let stream = stream.unwrap();
-
-//         handle_connection(stream);
-//     }
-// }
-
-// fn handle_connection(mut stream: TcpStream) {
-//     let buf_reader = BufReader::new(&mut stream);
-//     let request_line = buf_reader.lines().next().unwrap().unwrap();
-
-//     let (status_line, filename) = if request_line == "GET / HTTP/1.1" {
-//         ("HTTP/1.1 200 OK", "hello.html")
-//     } else {
-//         ("HTTP/1.1 404 NOT FOUND", "404.html")
-//     };
-
-//     let contents = fs::read_to_string(filename).unwrap();
-//     let length = contents.len();
-
-//     let response =
-//         format!("{status_line}\r\nContent-Length: {length}\r\n\r\n{contents}");
-
-//     stream.write_all(response.as_bytes()).unwrap();
-// }
-
-extern crate ws;
-
-use std::fs;
-use ws::{listen, Handler, Message, Request, Response, Result, Sender};
-
-struct Server { // Server struct for implementing the websocket
-    out: Sender,
+fn sleep() {
+    thread::sleep(std::time::Duration::from_millis(100));
 }
 
+fn handle_client(
+    mut socket: std::net::TcpStream,
+    addr: std::net::SocketAddr,
+    tx: mpsc::Sender<String>,
+) {
+    thread::spawn(move || {
+        loop {
+            let mut size_buf = [0; 4];
+            if let Ok(_) = socket.read_exact(&mut size_buf) {
+                let msg_size = u32::from_be_bytes(size_buf) as usize;
+                let mut msg_buf = vec![0; msg_size];
+                if let Ok(_) = socket.read_exact(&mut msg_buf) {
+                    let msg = String::from_utf8_lossy(&msg_buf);
+                    println!("{}", msg);
+                    tx.send(msg.into_owned()).expect("Failed to send message to rx");
+                }
+            }
 
-impl Handler for Server { // Implement websocket handler
-    // Handling requests and routes
-    fn on_request(&mut self, req: &Request) -> Result<Response> {
-        match req.resource() {
-            // Implement the websocket route
-            "/ws" => {
-                println!("Received request to WebSocket route");
-                Response::from_request(req)
-            },
-
-            // The main route where we will serve our html file
-            "/" => Ok(
-                Response::new(
-                    200,
-                    "OK",
-                    fs::read_to_string("chat.html")
-                    .expect("Something went wrong reading the file")
-                    .as_bytes()
-                    .to_vec()
-                )
-            ),
-
-            // Handle invalid routes
-            _ => Ok(Response::new(404, "Not Found", b"404 - Not Found".to_vec())),
+            sleep();
         }
-    }
-
-    // Handle messages recieved on /ws
-    fn on_message(&mut self, msg: Message) -> Result<()> {
-        // Broadcast the received msg to all clients
-        self.out.broadcast(msg)
-    }
+    });
 }
 
-fn main() {
-    // Listen on 127.0.0.1 (localhost) at port 8000 and make a Server struct for each client that gets connected
-    listen("127.0.0.1:8000", |out| Server { out }).unwrap()
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let server = TcpListener::bind(LOCAL)?;
+    server.set_nonblocking(true)?;
 
+    let (tx, rx) = mpsc::channel::<String>();
+    let mut clients = vec![];
+
+    loop {
+        if let Ok((socket, addr)) = server.accept() {
+            println!("Client {} connected", addr);
+            clients.push(socket.try_clone()?);
+            handle_client(socket, addr, tx.clone());
+        }
+
+        if let Ok(msg) = rx.try_recv() {
+            clients = clients
+                .into_iter()
+                .filter_map(|mut client| {
+                    let msg_bytes = msg.as_bytes();
+                    let msg_size = (msg_bytes.len() as u32).to_be_bytes();
+
+                    if let Err(_) = client.write_all(&msg_size) {
+                        return None;
+                    }
+
+                    if let Err(_) = client.write_all(msg_bytes) {
+                        return None;
+                    }
+
+                    Some(client)
+                })
+                .collect::<Vec<_>>();
+        }
+
+        sleep();
+    }
 }
